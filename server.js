@@ -1,90 +1,101 @@
 import express from "express";
 import mongoose from "mongoose";
-import dotenv from "dotenv";
 import cors from "cors";
+import dotenv from "dotenv";
+import formidable from "formidable";
+import { v2 as cloudinary } from "cloudinary";
+import { fileURLToPath } from "url";
+import path from "path";
 
-// Load .env
 dotenv.config();
-
-// MongoDB connection
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGO_URL);
-    console.log("⚡️ MongoDB connected");
-  } catch (err) {
-    console.error("MongoDB connection error:", err);
-    process.exit(1);
-  }
-};
-
-// Order schema + model
-const orderSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true },
-  address: { type: String, required: true },
-  age: { type: Number, required: true },
-  phone: { type: String, required: true },
-  province: { type: String, required: true },
-  city: { type: String, required: true },
-  braceletColor: { type: String, required: true },
-  gender: { type: String, enum: ["male", "female"], required: true },
-}, { timestamps: true });
-
-const Order = mongoose.model("Order", orderSchema);
-
-// Initialize Express app
 const app = express();
-connectDB();
-
 app.use(cors());
 app.use(express.json());
 
-// Routes
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Root
-app.get("/", (req, res) => {
-  res.send("🎨 Custom Bracelet Order API is running");
+// ─── MongoDB ──────────────────────────────────────
+mongoose
+  .connect(process.env.MONGO_URL)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
+
+const productSchema = new mongoose.Schema({
+  name: String,
+  photo: String,
+  description: String,
+  price: Number,
+  extraPhotos: [String],
+});
+const Product = mongoose.model("Product", productSchema);
+
+// ─── Cloudinary Config ────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUD_NAME,
+  api_key: process.env.CLOUD_API_KEY,
+  api_secret: process.env.CLOUD_API_SECRET,
 });
 
-// Place an order
-app.post("/api/order", async (req, res) => {
-  try {
-    const {
-      name, email, address, age, phone, province, city,
-      braceletColor, gender
-    } = req.body;
+// ─── Upload Endpoint ──────────────────────────────
+app.post("/api/products", (req, res) => {
+  const form = formidable({ multiples: true });
 
-    if (!name || !email || !address || !age || !phone || !province || !city || !braceletColor || !gender) {
-      return res.status(400).json({ success: false, message: "All fields are required" });
+  form.parse(req, async (err, fields, files) => {
+    if (err) return res.status(500).json({ error: "Form error", details: err });
+
+    try {
+      const { name, description, price } = fields;
+
+      const photo = files.photo?.[0] || files.photo;
+      const extraPhotos = files.extraPhotos || [];
+
+      const upload = async (file) => {
+        const result = await cloudinary.uploader.upload(file.filepath);
+        return result.secure_url;
+      };
+
+      const photoUrl = photo ? await upload(photo) : null;
+      const extraPhotosArr = Array.isArray(extraPhotos)
+        ? await Promise.all(extraPhotos.map(upload))
+        : extraPhotos?.filepath ? [await upload(extraPhotos)] : [];
+
+      const product = await Product.create({
+        name,
+        photo: photoUrl,
+        description,
+        price,
+        extraPhotos: extraPhotosArr,
+      });
+
+      res.status(201).json({ message: "✅ Product created", product });
+    } catch (err) {
+      res.status(500).json({ error: "Upload failed", details: err });
     }
-
-    const order = new Order({
-      name, email, address, age, phone, province, city,
-      braceletColor, gender
-    });
-    await order.save();
-
-    res.status(201).json({ success: true, message: "Order placed successfully", order });
-  } catch (error) {
-    console.error("Order creation error:", error);
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
-  }
+  });
 });
 
-// Get all orders (admin)
-app.get("/api/order", async (req, res) => {
+// ─── Get All ──────────────────────────────────────
+app.get("/api/products", async (req, res) => {
   try {
-    const orders = await Order.find().sort({ createdAt: -1 });
-    res.json({ success: true, orders });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
+    const products = await Product.find();
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch products" });
   }
 });
 
-// 404 fallback
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: "Route not found" });
+// ─── Delete Product ───────────────────────────────
+app.delete("/api/products/:id", async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ error: "Not found" });
+
+    await product.deleteOne();
+    res.json({ message: "🗑️ Deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Delete failed", details: err });
+  }
 });
 
-// Start server
 export default app;
