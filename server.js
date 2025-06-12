@@ -87,3 +87,4 @@ app.use((req, res) => {
 });
 
 // Start server
+export default app;
